@@ -17,12 +17,12 @@ PRICE_HISTORY_WINDOW = 100
 LOOKAHEAD_ROWS = 500
 FEE_PCT = 0.0004 # 0.04% taker fee
 
-# NEW: Dynamic Barrier Configuration
+# Dynamic Barrier Configuration
 K_VOL = 0.40               # Multiplier for volatility to set barrier width
 PROFIT_TAKE_MULT = 1.2     # Profit target is 1.2x the vol-based move
 STOP_LOSS_MULT = 1.0       # Stop loss is 1.0x the vol-based move
 RETURNS_WINDOW_SIZE = 200  # Window for calculating rolling volatility
-MIN_PROFIT_PCT = 0.001     # NEW: Minimum 0.1% profit target to ensure goal is achievable
+MIN_PROFIT_PCT = 0.001     # Minimum 0.1% profit target to ensure goal is achievable
 
 def build_dataset(trade_path: str, book_path: str, output_dir: str):
     """
@@ -43,7 +43,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
         "welford_cvd_5s": WelfordStats(),
         "welford_cvd_1m": WelfordStats(),
         "welford_cvd_3m": WelfordStats(),
-        # NEW: State for the new tactical RV feature
+        # State for the new tactical RV feature
         "mid_price_history": deque(maxlen=50),
         "welford_rv_tactical": WelfordStats(),
     }
@@ -55,7 +55,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
         "spread": deque(maxlen=RAW_SEQ_WINDOW)
     }
     
-    # NEW: State for Dynamic Barriers
+    # State for Dynamic Barriers
     returns_window = deque(maxlen=RETURNS_WINDOW_SIZE)
     last_microprice = None
     
@@ -94,29 +94,28 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             raw_history["microprice"].append(microprice)
             raw_history["spread"].append(ask - bid)
             
-            # NEW: Update state for tactical RV feature
+            # Update state for tactical RV feature
             mid_price = 0.5 * (bid + ask)
             state["mid_price_history"].append(mid_price)
 
-            # NEW: Update returns window for dynamic barriers
+            # Update returns window for dynamic barriers
             if last_microprice is not None and microprice > 0 and last_microprice > 0:
                 ret = (microprice - last_microprice) / last_microprice
                 returns_window.append(ret)
             last_microprice = microprice
         
         # --- Generate Sample Packet ---
-        # MODIFIED: Wait for returns window to fill before generating samples
+        # Wait for returns window to fill before generating samples
         if len(raw_history["microprice"]) == RAW_SEQ_WINDOW and len(returns_window) >= 50:
             # 1. Generate Human Features
             features = calculate_features(state)
             if not features: continue
 
             # 2. Generate Label with DYNAMIC barriers
-            # --- START OF APPLIED FIX ---
             vol_now = np.std(returns_window)
             dynamic_barrier_width = K_VOL * vol_now
 
-            # KEY FIX: Ensure the barrier is at least our minimum achievable target
+            # Ensure the barrier is at least our minimum achievable target
             final_barrier_width = max(MIN_PROFIT_PCT, dynamic_barrier_width)
 
             # Use this sane barrier for both profit-take and stop-loss
@@ -126,7 +125,6 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             label, ret, t_hit = find_triple_barrier_label(
                 df, i, final_pt_pct, final_sl_pct, LOOKAHEAD_ROWS, FEE_PCT
             )
-            # --- END OF APPLIED FIX ---
 
             # 3. Generate Raw Sequence for NN
             sequence = np.stack([
