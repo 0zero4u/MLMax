@@ -22,6 +22,7 @@ K_VOL = 0.40               # Multiplier for volatility to set barrier width
 PROFIT_TAKE_MULT = 1.2     # Profit target is 1.2x the vol-based move
 STOP_LOSS_MULT = 1.0       # Stop loss is 1.0x the vol-based move
 RETURNS_WINDOW_SIZE = 200  # Window for calculating rolling volatility
+MIN_PROFIT_PCT = 0.001     # NEW: Minimum 0.1% profit target to ensure goal is achievable
 
 def build_dataset(trade_path: str, book_path: str, output_dir: str):
     """
@@ -111,15 +112,21 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             if not features: continue
 
             # 2. Generate Label with DYNAMIC barriers
+            # --- START OF APPLIED FIX ---
             vol_now = np.std(returns_window)
-            barrier_width = K_VOL * max(vol_now, 1e-5) # Add a floor for stability
+            dynamic_barrier_width = K_VOL * vol_now
 
-            dynamic_pt_pct = barrier_width * PROFIT_TAKE_MULT
-            dynamic_sl_pct = barrier_width * STOP_LOSS_MULT
+            # KEY FIX: Ensure the barrier is at least our minimum achievable target
+            final_barrier_width = max(MIN_PROFIT_PCT, dynamic_barrier_width)
+
+            # Use this sane barrier for both profit-take and stop-loss
+            final_pt_pct = final_barrier_width * PROFIT_TAKE_MULT
+            final_sl_pct = final_barrier_width * STOP_LOSS_MULT
             
             label, ret, t_hit = find_triple_barrier_label(
-                df, i, dynamic_pt_pct, dynamic_sl_pct, LOOKAHEAD_ROWS, FEE_PCT
+                df, i, final_pt_pct, final_sl_pct, LOOKAHEAD_ROWS, FEE_PCT
             )
+            # --- END OF APPLIED FIX ---
 
             # 3. Generate Raw Sequence for NN
             sequence = np.stack([
@@ -166,4 +173,3 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="Directory to save the output parquet and npy files.")
     args = parser.parse_args()
     build_dataset(args.trade_csv, args.book_csv, args.out_dir)
-
