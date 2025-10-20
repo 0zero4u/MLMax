@@ -16,8 +16,8 @@ RAW_SEQ_WINDOW = 100
 PRICE_HISTORY_WINDOW = 100
 LOOKAHEAD_ROWS = 500
 FEE_PCT = 0.0004 # 0.04% taker fee
-### NEW: Warmup period to allow normalization stats to stabilize ###
-WARMUP_TICKS = 2000 # Number of book events to process before generating samples
+### MODIFIED: Changed to a time-based warmup for better robustness ###
+WARMUP_MINUTES = 3.0 # Number of minutes to process before generating samples
 
 # Dynamic Barrier Configuration
 K_VOL = 0.40               # Multiplier for volatility to set barrier width
@@ -26,14 +26,12 @@ STOP_LOSS_MULT = 1.0       # Stop loss is 1.0x the vol-based move
 RETURNS_WINDOW_SIZE = 200  # Window for calculating rolling volatility
 MIN_PROFIT_PCT = 0.001     # Minimum 0.1% profit target to ensure goal is achievable
 
-### NEW: Diagnostic report for generated features ###
 def generate_feature_health_report(df_features: pd.DataFrame):
     """Generates a summary report of the feature statistics."""
     print("\n" + "="*50)
     print(" " * 15 + "Feature Health Report")
     print("="*50)
     
-    # Exclude non-feature columns for the report
     feature_cols = [c for c in df_features.columns if c not in ['time']]
     stats = df_features[feature_cols].describe().transpose()
     stats['abs_mean'] = stats['mean'].abs()
@@ -54,7 +52,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     df = load_and_merge(trade_path, book_path)
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"Step 2: Simulating event stream (warming up for {WARMUP_TICKS} ticks)...")
+    print(f"Step 2: Simulating event stream (warming up for {WARMUP_MINUTES} minutes)...")
     
     # --- State Initialization ---
     state = {
@@ -65,7 +63,6 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
         "welford_cvd_5s": WelfordStats(),
         "welford_cvd_1m": WelfordStats(),
         "welford_cvd_3m": WelfordStats(),
-        # State for the new tactical RV feature
         "mid_price_history": deque(maxlen=50),
         "welford_rv_tactical": WelfordStats(),
     }
@@ -91,13 +88,17 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
 
     # --- Main Simulation Loop ---
     trigger_indices = df[df["stream_type"] == "book"].index
-    book_event_counter = 0 # Counter for warmup period
+    
+    ### NEW: Time-based warmup logic ###
+    start_time_ms = df.iloc[0]["time"]
+    warmup_duration_ms = WARMUP_MINUTES * 60 * 1000
+    warmup_end_time_ms = start_time_ms + warmup_duration_ms
     
     for i in tqdm(trigger_indices, desc="Generating Samples"):
-        book_event_counter += 1
-        volume_since_last_book = 0.0
+        current_time_ms = df.iloc[i]["time"]
         
-        # Fast-forward state to current index `i`
+        # --- Process state regardless of warmup to seed Welford stats ---
+        volume_since_last_book = 0.0
         start_index = state.get("last_processed_index", -1) + 1
         for j in range(start_index, i + 1):
             row = df.iloc[j]
@@ -106,14 +107,11 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 cumulative_cvd += sign * row["quote_qty"]
                 state["cvd_history"].append((row["time"] / 1000.0, cumulative_cvd))
                 volume_since_last_book += row["quote_qty"]
-
         state["last_processed_index"] = i
         
-        # Current book state for feature calculation
         current_book = df.iloc[i]
         state.update(current_book.to_dict())
 
-        # Update raw history and state with book data
         bid, ask = current_book["best_bid_price"], current_book["best_ask_price"]
         bid_q, ask_q = current_book["best_bid_qty"], current_book["best_ask_qty"]
         if not (np.isnan(bid) or np.isnan(ask) or np.isnan(bid_q) or np.isnan(ask_q)):
@@ -130,9 +128,9 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 returns_window.append(ret)
             last_microprice = microprice
         
-        ### MODIFIED: Added warmup period condition ###
+        ### MODIFIED: Check against warmup end time ###
         # Generate Sample Packet only after warmup and if windows are full
-        if book_event_counter > WARMUP_TICKS and len(raw_history["microprice"]) == RAW_SEQ_WINDOW and len(returns_window) >= 50:
+        if current_time_ms > warmup_end_time_ms and len(raw_history["microprice"]) == RAW_SEQ_WINDOW and len(returns_window) >= 50:
             # 1. Generate Human Features
             features = calculate_features(state)
             if not features: continue
@@ -181,7 +179,6 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     save_parquet(df_labels, os.path.join(output_dir, "labels.parquet"))
     save_npy(raw_sequences_list, os.path.join(output_dir, "raw_sequences.npy"))
 
-    ### NEW: Run and display the feature health report ###
     if not df_hf.empty:
         generate_feature_health_report(df_hf)
 
@@ -195,4 +192,3 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="Directory to save the output parquet and npy files.")
     args = parser.parse_args()
     build_dataset(args.trade_csv, args.book_csv, args.out_dir)
-    
