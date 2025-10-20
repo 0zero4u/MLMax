@@ -122,4 +122,4 @@ if __name__ == "__main__":
     p.add_argument("--out", default="transformer_feature_extractor.pth", help="Path to save the trained model weights.")
     args = p.parse_args()
     train(args.seq, args.labels, args.out)
-
+                
