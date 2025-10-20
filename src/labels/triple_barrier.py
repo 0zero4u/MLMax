@@ -16,8 +16,11 @@ def find_triple_barrier_label(df: pd.DataFrame, i: int, pt_pct: float, sl_pct: f
 
     Returns:
         A tuple of (label, realized_return, time_to_hit).
-        label: 1 for a long win, -1 for a short win, 0 for timeout/loss.
-               We simplify to a three-class problem for the classifier.
+        label:
+            1: Long win (profit take)
+           -1: Short win (profit take)
+            0: Timeout (time horizon)
+            2: Loss (stop loss)
         realized_return: The net return after fees for the regressor.
         time_to_hit: Number of rows until a barrier was hit.
     """
@@ -56,7 +59,7 @@ def find_triple_barrier_label(df: pd.DataFrame, i: int, pt_pct: float, sl_pct: f
         if future_bid <= sl_long_price:
             realized_ret = (future_bid - entry_ask) / entry_ask
             net_ret = realized_ret - 2 * fee_pct
-            return 0, net_ret, time_to_hit # Loss is a neutral class
+            return 2, net_ret, time_to_hit # CHANGED: Loss is now label 2
 
         # --- Check Short Scenario ---
         # Profit take: can buy back at the future ask
@@ -68,15 +71,7 @@ def find_triple_barrier_label(df: pd.DataFrame, i: int, pt_pct: float, sl_pct: f
         if future_ask >= sl_short_price:
             realized_ret = (entry_bid - future_ask) / entry_bid
             net_ret = realized_ret - 2 * fee_pct
-            return 0, net_ret, time_to_hit # Loss is a neutral class
+            return 2, net_ret, time_to_hit # CHANGED: Loss is now label 2
 
-    # If no barrier was hit, it's a timeout
-    # Calculate P&L at the horizon
-    last_event = future_events.iloc[-1]
-    final_bid = last_event["best_bid_price"]
-    if np.isnan(final_bid):
-        return 0, 0.0, max_horizon
-    
-    final_long_ret = (final_bid - entry_ask) / entry_ask - 2 * fee_pct
-    return 0, final_long_ret, max_horizon
-    
+    # If no barrier was hit, it's a timeout with zero return
+    return 0, 0.0, max_horizon
