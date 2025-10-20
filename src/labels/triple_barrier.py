@@ -1,48 +1,82 @@
-# src/labels/triple_barrier.py
-"""
-Triple barrier labeler.
-Simple, clear implementation that looks forward `max_horizon` rows from index i
-and returns label in {1, -1, 0}.
-It uses mid_price when available, otherwise trade price.
-Fees are applied (fee_pct is round-trip percentage).
-"""
-
 from typing import Tuple
 import numpy as np
+import pandas as pd
 
-def find_triple_barrier_label(df, i:int, pt:float, sl:float, max_horizon:int, fee_pct:float=0.00075):
+def find_triple_barrier_label(df: pd.DataFrame, i: int, pt_pct: float, sl_pct: float, max_horizon: int, fee_pct: float) -> Tuple[int, float, int]:
     """
-    df: unified dataframe (must have 'mid_price' or 'price' columns)
-    i: current row index (entry)
-    pt, sl: profit-take / stop-loss as relative fractions (e.g., 0.0015)
-    max_horizon: number of rows to look ahead
-    fee_pct: per trade fee fraction (apply both entry+exit -> approx 2*fee_pct)
-    Returns: label (1, -1, 0)
+    Finds the label for an event at index `i` by looking ahead in the DataFrame.
+
+    Args:
+        df: The unified, time-sorted DataFrame of all market events.
+        i: The current row index (the point of entry).
+        pt_pct: Profit-take percentage (e.g., 0.001 for 0.1%).
+        sl_pct: Stop-loss percentage (e.g., 0.001 for 0.1%).
+        max_horizon: Maximum number of rows to look ahead for a barrier hit.
+        fee_pct: Taker fee percentage (e.g., 0.0004 for 0.04%).
+
+    Returns:
+        A tuple of (label, realized_return, time_to_hit).
+        label: 1 for a long win, -1 for a short win, 0 for timeout/loss.
+               We simplify to a three-class problem for the classifier.
+        realized_return: The net return after fees for the regressor.
+        time_to_hit: Number of rows until a barrier was hit.
     """
-    n = len(df)
-    entry = df.iloc[i]
-    # entry price: prefer mid_price if present else price
-    entry_price = entry.get("mid_price") if not np.isnan(entry.get("mid_price") if entry.get("mid_price") is not None else np.nan) else entry.get("price")
-    if entry_price is None or np.isnan(entry_price):
-        return 0
+    entry_event = df.iloc[i]
+    entry_ask = entry_event["best_ask_price"]
+    entry_bid = entry_event["best_bid_price"]
 
-    # apply fees: to be conservative, require profit beyond fees
-    round_trip_fee = 2 * fee_pct
-    upper = entry_price * (1.0 + pt + round_trip_fee)
-    lower = entry_price * (1.0 - sl - round_trip_fee)
+    if np.isnan(entry_ask) or np.isnan(entry_bid):
+        return 0, 0.0, max_horizon
 
-    # iterate forward
-    end = min(n, i + max_horizon + 1)
-    for j in range(i+1, end):
-        r = df.iloc[j]
-        # use future executable price: mid_price if present else trade price
-        p = r.get("mid_price") if not np.isnan(r.get("mid_price") if r.get("mid_price") is not None else np.nan) else r.get("price")
-        if p is None or np.isnan(p):
+    # Define barriers based on executable prices
+    pt_long_price = entry_ask * (1 + pt_pct)
+    sl_long_price = entry_ask * (1 - sl_pct)
+    
+    pt_short_price = entry_bid * (1 - pt_pct)
+    sl_short_price = entry_bid * (1 + sl_pct)
+
+    # Look ahead for a barrier hit
+    future_events = df.iloc[i + 1 : i + 1 + max_horizon]
+
+    for j, future_event in enumerate(future_events.itertuples()):
+        time_to_hit = j + 1
+        future_ask = future_event.best_ask_price
+        future_bid = future_event.best_bid_price
+
+        if np.isnan(future_ask) or np.isnan(future_bid):
             continue
-        if p >= upper:
-            return 1
-        if p <= lower:
-            return -1
-    # timeout
-    return 0
-  
+
+        # --- Check Long Scenario ---
+        # Profit take: can sell at the future bid
+        if future_bid >= pt_long_price:
+            realized_ret = (future_bid - entry_ask) / entry_ask
+            net_ret = realized_ret - 2 * fee_pct
+            return 1, net_ret, time_to_hit
+        # Stop loss: forced to sell at the future bid
+        if future_bid <= sl_long_price:
+            realized_ret = (future_bid - entry_ask) / entry_ask
+            net_ret = realized_ret - 2 * fee_pct
+            return 0, net_ret, time_to_hit # Loss is a neutral class
+
+        # --- Check Short Scenario ---
+        # Profit take: can buy back at the future ask
+        if future_ask <= pt_short_price:
+            realized_ret = (entry_bid - future_ask) / entry_bid
+            net_ret = realized_ret - 2 * fee_pct
+            return -1, net_ret, time_to_hit
+        # Stop loss: forced to buy back at the future ask
+        if future_ask >= sl_short_price:
+            realized_ret = (entry_bid - future_ask) / entry_bid
+            net_ret = realized_ret - 2 * fee_pct
+            return 0, net_ret, time_to_hit # Loss is a neutral class
+
+    # If no barrier was hit, it's a timeout
+    # Calculate P&L at the horizon
+    last_event = future_events.iloc[-1]
+    final_bid = last_event["best_bid_price"]
+    if np.isnan(final_bid):
+        return 0, 0.0, max_horizon
+    
+    final_long_ret = (final_bid - entry_ask) / entry_ask - 2 * fee_pct
+    return 0, final_long_ret, max_horizon
+    
