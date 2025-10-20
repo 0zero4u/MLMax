@@ -1,8 +1,3 @@
-# src/ingest/loader.py
-"""
-Fast loader + merge for trade + book CSVs. Exposes `load_and_merge`.
-"""
-
 import pandas as pd
 import numpy as np
 from typing import Tuple
@@ -36,3 +31,4 @@ def load_and_merge(trade_path: str, book_path: str, symbol:str="BTCUSDT") -> pd.
     df["datetime"] = pd.to_datetime(df["time"], unit="ms")
     df["symbol"] = symbol
     return df
+    
