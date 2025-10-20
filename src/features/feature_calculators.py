@@ -49,7 +49,7 @@ def calculate_features(state: Dict[str, Any]) -> Dict[str, float]:
     else:
         features["rv_norm"] = 0.0
 
-    # --- NEW: Tactical Realized Volatility (from Live Script) ---
+    # Tactical Realized Volatility
     if len(state["mid_price_history"]) >= 20:
         mid_price_arr = np.array(state["mid_price_history"])
         # Variance of mid-price changes is a simple measure of jitter
