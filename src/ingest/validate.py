@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 
@@ -38,4 +37,3 @@ def validate_book_csv(path: str) -> pd.DataFrame:
     df["best_ask_qty"] = df["best_ask_qty"].astype(float)
     df["time"] = df["time"].astype("int64")
     return df
-  
