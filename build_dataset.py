@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np
 from collections import deque
@@ -66,10 +67,13 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     human_features_list = []
     raw_sequences_list = []
     labels_list = []
-
+    
     # --- Main Simulation Loop ---
     trigger_indices = df[df["stream_type"] == "book"].index
     for i in tqdm(trigger_indices, desc="Generating Samples"):
+        # --- FIX: Initialize aggregated volume for the interval ---
+        volume_since_last_book = 0.0
+        
         # Fast-forward state to current index `i`
         start_index = state.get("last_processed_index", -1) + 1
         for j in range(start_index, i + 1):
@@ -78,7 +82,8 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 sign = 1 if not row["is_buyer_maker"] else -1
                 cumulative_cvd += sign * row["quote_qty"]
                 state["cvd_history"].append((row["time"] / 1000.0, cumulative_cvd))
-                raw_history["volume"].append(row["quote_qty"])
+                # --- FIX: Aggregate volume instead of appending directly ---
+                volume_since_last_book += row["quote_qty"]
 
         state["last_processed_index"] = i
         
@@ -93,6 +98,8 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             microprice = (bid * ask_q + ask * bid_q) / (bid_q + ask_q + 1e-9)
             raw_history["microprice"].append(microprice)
             raw_history["spread"].append(ask - bid)
+            # --- FIX: Append the aggregated volume for synchronization ---
+            raw_history["volume"].append(volume_since_last_book)
             
             # Update state for tactical RV feature
             mid_price = 0.5 * (bid + ask)
