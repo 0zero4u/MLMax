@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import argparse
 from src.models.transformer_arch import TransformerFeatureExtractor
+from sklearn.metrics import classification_report
 
 class Predictor(nn.Module):
     """Wrapper model for training: combines feature extractor and a classification head."""
@@ -26,16 +27,20 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
     # Labels need to be shifted for CrossEntropyLoss: {-1, 0, 1} -> {0, 1, 2}
     y = pd.read_parquet(labels_parquet)["label"].values.astype(np.int64) + 1
     
-    # Time-based split: 70% train, 15% val, 15% test
+    # --- UPDATED: Full Train/Validation/Test Split ---
     n = len(X)
-    i1 = int(n * 0.7); i2 = int(n * 0.85)
-    X_train, X_val = X[:i1], X[i1:i2]
-    y_train, y_val = y[:i1], y[i1:i2]
+    i1 = int(n * 0.7)
+    i2 = int(n * 0.85)
+    X_train, X_val, X_test = X[:i1], X[i1:i2], X[i2:]
+    y_train, y_val, y_test = y[:i1], y[i1:i2], y[i2:]
 
     train_dataset = TensorDataset(torch.from_numpy(X_train), torch.from_numpy(y_train))
     val_dataset = TensorDataset(torch.from_numpy(X_val), torch.from_numpy(y_val))
+    test_dataset = TensorDataset(torch.from_numpy(X_test), torch.from_numpy(y_test))
+
     train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=bs, shuffle=False)
 
     # --- Model Config (should be stored in a config file) ---
     model_config = {
@@ -57,7 +62,6 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
     print("Starting training...")
     for e in range(epochs):
         model.train()
-        total_train_loss = 0.0
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             logits = model(xb)
@@ -66,7 +70,6 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            total_train_loss += loss.item() * xb.shape[0]
         
         scheduler.step()
         
@@ -79,9 +82,8 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
                 loss = loss_fn(logits, yb)
                 total_val_loss += loss.item() * xb.shape[0]
         
-        avg_train_loss = total_train_loss / len(train_dataset)
         avg_val_loss = total_val_loss / len(val_dataset)
-        print(f"Epoch {e+1}/{epochs}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}")
+        print(f"Epoch {e+1}/{epochs}: Val Loss={avg_val_loss:.4f}")
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -93,6 +95,25 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
             if early_stop_counter >= patience:
                 print("Early stopping triggered.")
                 break
+    
+    print("\n--- Final Evaluation on Test Set ---")
+    # Load the best model for final evaluation
+    best_feature_extractor = TransformerFeatureExtractor(**model_config)
+    best_feature_extractor.load_state_dict(torch.load(output_path, map_location=device))
+    final_model = Predictor(best_feature_extractor, model_config["output_dim"], num_classes=3).to(device)
+    final_model.eval()
+    
+    all_preds = []
+    all_true = []
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            logits = final_model(xb)
+            preds = torch.argmax(logits, dim=1)
+            all_preds.extend(preds.cpu().numpy())
+            all_true.extend(yb.cpu().numpy())
+            
+    print(classification_report(all_true, all_preds, target_names=["Short Win", "Neutral/Loss", "Long Win"]))
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Train the Transformer feature extractor.")
