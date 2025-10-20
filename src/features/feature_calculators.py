@@ -36,7 +36,7 @@ def calculate_features(state: Dict[str, Any]) -> Dict[str, float]:
     state["welford_spread"].update(rel_spread)
     features["spread_norm"] = state["welford_spread"].normalize(rel_spread)
     
-    # Microprice and RV
+    # Microprice and Log-Return RV (Original)
     microprice = (bid_p * ask_q + ask_p * bid_q) / (total_qty + EPS)
     state["price_history"].append(microprice)
     
@@ -48,6 +48,16 @@ def calculate_features(state: Dict[str, Any]) -> Dict[str, float]:
         features["rv_norm"] = state["welford_rv"].normalize(rv)
     else:
         features["rv_norm"] = 0.0
+
+    # --- NEW: Tactical Realized Volatility (from Live Script) ---
+    if len(state["mid_price_history"]) >= 20:
+        mid_price_arr = np.array(state["mid_price_history"])
+        # Variance of mid-price changes is a simple measure of jitter
+        rv_tactical = np.var(np.diff(mid_price_arr))
+        state["welford_rv_tactical"].update(rv_tactical)
+        features["rv_tactical_norm"] = state["welford_rv_tactical"].normalize(rv_tactical)
+    else:
+        features["rv_tactical_norm"] = 0.0
 
     # --- CVD Features (Time-Aware) ---
     now = state["time"] / 1000.0 # Convert ms to seconds
@@ -78,4 +88,4 @@ def calculate_features(state: Dict[str, Any]) -> Dict[str, float]:
 
     features["time"] = state.get("time")
     return features
- 
+    
