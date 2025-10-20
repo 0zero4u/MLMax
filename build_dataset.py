@@ -14,20 +14,19 @@ from src.utils.io import save_parquet, save_npy
 # --- Configuration (Inspired by Live Script) ---
 RAW_SEQ_WINDOW = 100
 PRICE_HISTORY_WINDOW = 100
-LOOKAHEAD_ROWS = 500
-FEE_PCT = 0.0004 # 0.04% taker fee
-### MODIFIED: Changed to a time-based warmup for better robustness ###
-WARMUP_MINUTES = 3.0 # Number of minutes to process before generating samples
+TIME_HORIZON_SECONDS = 30.0 
+FEE_PCT = 0.0004
+WARMUP_MINUTES = 3.0
 
 # Dynamic Barrier Configuration
-K_VOL = 0.40               # Multiplier for volatility to set barrier width
-PROFIT_TAKE_MULT = 1.2     # Profit target is 1.2x the vol-based move
-STOP_LOSS_MULT = 1.0       # Stop loss is 1.0x the vol-based move
-RETURNS_WINDOW_SIZE = 200  # Window for calculating rolling volatility
-MIN_PROFIT_PCT = 0.001     # Minimum 0.1% profit target to ensure goal is achievable
+K_VOL = 0.40
+PROFIT_TAKE_MULT = 1.2
+STOP_LOSS_MULT = 1.0
+RETURNS_WINDOW_SIZE = 200
+MIN_PROFIT_PCT = 0.001
 
 def generate_feature_health_report(df_features: pd.DataFrame):
-    """Generates a summary report of the feature statistics."""
+    # ... (function remains the same)
     print("\n" + "="*50)
     print(" " * 15 + "Feature Health Report")
     print("="*50)
@@ -55,49 +54,35 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     print(f"Step 2: Simulating event stream (warming up for {WARMUP_MINUTES} minutes)...")
     
     # --- State Initialization ---
+    # ... (state initialization remains the same)
     state = {
-        "cvd_history": deque(),
-        "price_history": deque(maxlen=PRICE_HISTORY_WINDOW),
-        "welford_spread": WelfordStats(),
-        "welford_rv": WelfordStats(),
-        "welford_cvd_5s": WelfordStats(),
-        "welford_cvd_1m": WelfordStats(),
-        "welford_cvd_3m": WelfordStats(),
-        "mid_price_history": deque(maxlen=50),
-        "welford_rv_tactical": WelfordStats(),
+        "cvd_history": deque(), "price_history": deque(maxlen=PRICE_HISTORY_WINDOW),
+        "welford_spread": WelfordStats(), "welford_rv": WelfordStats(),
+        "welford_cvd_5s": WelfordStats(), "welford_cvd_1m": WelfordStats(), "welford_cvd_3m": WelfordStats(),
+        "mid_price_history": deque(maxlen=50), "welford_rv_tactical": WelfordStats(),
     }
-    
-    # Raw history for NN sequences
     raw_history = {
-        "microprice": deque(maxlen=RAW_SEQ_WINDOW),
-        "volume": deque(maxlen=RAW_SEQ_WINDOW),
+        "microprice": deque(maxlen=RAW_SEQ_WINDOW), "volume": deque(maxlen=RAW_SEQ_WINDOW),
         "spread": deque(maxlen=RAW_SEQ_WINDOW)
     }
-    
-    # State for Dynamic Barriers
     returns_window = deque(maxlen=RETURNS_WINDOW_SIZE)
     last_microprice = None
-    
-    # Cumulative CVD state
     cumulative_cvd = 0.0
-
-    # Lists to store final data
-    human_features_list = []
-    raw_sequences_list = []
-    labels_list = []
+    human_features_list, raw_sequences_list, labels_list = [], [], []
 
     # --- Main Simulation Loop ---
     trigger_indices = df[df["stream_type"] == "book"].index
-    
-    ### NEW: Time-based warmup logic ###
     start_time_ms = df.iloc[0]["time"]
     warmup_duration_ms = WARMUP_MINUTES * 60 * 1000
     warmup_end_time_ms = start_time_ms + warmup_duration_ms
     
+    ### NEW: State for trade-based sampling ###
+    trades_since_last_sample = 0
+
     for i in tqdm(trigger_indices, desc="Generating Samples"):
         current_time_ms = df.iloc[i]["time"]
         
-        # --- Process state regardless of warmup to seed Welford stats ---
+        # --- Process state (always runs to keep stats up-to-date) ---
         volume_since_last_book = 0.0
         start_index = state.get("last_processed_index", -1) + 1
         for j in range(start_index, i + 1):
@@ -107,11 +92,14 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 cumulative_cvd += sign * row["quote_qty"]
                 state["cvd_history"].append((row["time"] / 1000.0, cumulative_cvd))
                 volume_since_last_book += row["quote_qty"]
+                ### NEW: Increment trade counter ###
+                trades_since_last_sample += 1
         state["last_processed_index"] = i
         
         current_book = df.iloc[i]
         state.update(current_book.to_dict())
 
+        # Update raw history with the latest book state
         bid, ask = current_book["best_bid_price"], current_book["best_ask_price"]
         bid_q, ask_q = current_book["best_bid_qty"], current_book["best_ask_qty"]
         if not (np.isnan(bid) or np.isnan(ask) or np.isnan(bid_q) or np.isnan(ask_q)):
@@ -128,9 +116,18 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 returns_window.append(ret)
             last_microprice = microprice
         
-        ### MODIFIED: Check against warmup end time ###
-        # Generate Sample Packet only after warmup and if windows are full
-        if current_time_ms > warmup_end_time_ms and len(raw_history["microprice"]) == RAW_SEQ_WINDOW and len(returns_window) >= 50:
+        ### MODIFIED: Generate sample only if a trade has occurred ###
+        conditions_met = (
+            current_time_ms > warmup_end_time_ms and
+            len(raw_history["microprice"]) == RAW_SEQ_WINDOW and
+            len(returns_window) >= 50 and
+            trades_since_last_sample > 0  # The crucial new condition
+        )
+
+        if conditions_met:
+            # --- Reset the trade counter after deciding to sample ---
+            trades_since_last_sample = 0
+
             # 1. Generate Human Features
             features = calculate_features(state)
             if not features: continue
@@ -143,7 +140,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             final_sl_pct = final_barrier_width * STOP_LOSS_MULT
             
             label, ret, t_hit = find_triple_barrier_label(
-                df, i, final_pt_pct, final_sl_pct, LOOKAHEAD_ROWS, FEE_PCT
+                df, i, final_pt_pct, final_sl_pct, TIME_HORIZON_SECONDS, FEE_PCT
             )
 
             # 3. Generate Raw Sequence for NN
@@ -163,6 +160,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 "time_to_hit": t_hit
             })
 
+    # ... (Rest of the script for saving data and reporting remains the same)
     print("Step 3: Saving datasets to disk...")
     df_hf = pd.DataFrame(human_features_list)
     df_labels = pd.DataFrame(labels_list)
@@ -187,8 +185,6 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build feature and label datasets from raw tick data.")
-    parser.add_argument("--trade-csv", required=True, help="Path to the trade data CSV.")
-    parser.add_argument("--book-csv", required=True, help="Path to the book ticker data CSV.")
-    parser.add_argument("--out-dir", required=True, help="Directory to save the output parquet and npy files.")
+    # ... (args remain the same)
     args = parser.parse_args()
     build_dataset(args.trade_csv, args.book_csv, args.out_dir)
