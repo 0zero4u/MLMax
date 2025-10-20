@@ -59,7 +59,7 @@ def find_triple_barrier_label(df: pd.DataFrame, i: int, pt_pct: float, sl_pct: f
         if future_bid <= sl_long_price:
             realized_ret = (future_bid - entry_ask) / entry_ask
             net_ret = realized_ret - 2 * fee_pct
-            return 2, net_ret, time_to_hit # CHANGED: Loss is now label 2
+            return 2, net_ret, time_to_hit
 
         # --- Check Short Scenario ---
         # Profit take: can buy back at the future ask
@@ -71,7 +71,8 @@ def find_triple_barrier_label(df: pd.DataFrame, i: int, pt_pct: float, sl_pct: f
         if future_ask >= sl_short_price:
             realized_ret = (entry_bid - future_ask) / entry_bid
             net_ret = realized_ret - 2 * fee_pct
-            return 2, net_ret, time_to_hit # CHANGED: Loss is now label 2
+            return 2, net_ret, time_to_hit
 
     # If no barrier was hit, it's a timeout with zero return
     return 0, 0.0, max_horizon
+    
