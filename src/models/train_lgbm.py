@@ -34,23 +34,35 @@ def train(hf_path, nf_path, labels_path, out_clf="lgbm_classifier.joblib", out_r
 
     # 3. Train Classifier
     print("\n--- Training LGBM Classifier ---")
-    clf = lgb.LGBMClassifier(objective="multiclass", num_class=3, n_estimators=1000, random_state=42, n_jobs=-1)
-    clf.fit(X_train, y_clf_train, eval_set=[(X_val, y_clf_val)], 
+    # CHANGED: num_class is now 4 to handle {-1, 0, 1, 2}
+    clf = lgb.LGBMClassifier(objective="multiclass", num_class=4, n_estimators=1000, random_state=42, n_jobs=-1)
+    
+    # LightGBM requires labels in [0, num_class-1]. We need to map {-1, 0, 1, 2} -> {0, 1, 2, 3}
+    label_map = {-1: 0, 0: 1, 1: 2, 2: 3}
+    y_clf_train_mapped = y_clf_train.map(label_map)
+    y_clf_val_mapped = y_clf_val.map(label_map)
+    
+    clf.fit(X_train, y_clf_train_mapped, eval_set=[(X_val, y_clf_val_mapped)], 
             callbacks=[lgb.early_stopping(100, verbose=True)])
     joblib.dump(clf, out_clf)
     print(f"Classifier saved to {out_clf}")
     
     print("\nClassifier Evaluation on Test Set:")
-    preds_labels = clf.predict(X_test)
-    # Adjust labels for report: {-1, 0, 1} -> {0, 1, 2} and then map to names
-    print(classification_report(y_clf_test, preds_labels, target_names=["Short Win (-1)", "Neutral/Loss (0)", "Long Win (1)"]))
+    preds_labels_mapped = clf.predict(X_test)
+    # Map predictions back to original labels for reporting
+    reverse_map = {v: k for k, v in label_map.items()}
+    preds_labels = pd.Series(preds_labels_mapped).map(reverse_map)
+    
+    # CHANGED: Updated target_names for the new scheme
+    target_names = ["Short Win (-1)", "Timeout (0)", "Long Win (1)", "Loss (2)"]
+    print(classification_report(y_clf_test, preds_labels, target_names=target_names, labels=[-1, 0, 1, 2]))
 
     # 4. Train Regressor
     print("\n--- Training LGBM Regressor ---")
-    # --- UPDATED: Train ONLY on Win conditions (label is not 0) ---
-    win_indices_train = y_clf_train[y_clf_train != 0].index
-    win_indices_val = y_clf_val[y_clf_val != 0].index
-    win_indices_test = y_clf_test[y_clf_test != 0].index
+    # --- UPDATED: Train ONLY on Win conditions (label is 1 or -1) ---
+    win_indices_train = y_clf_train[y_clf_train.isin([1, -1])].index
+    win_indices_val = y_clf_val[y_clf_val.isin([1, -1])].index
+    win_indices_test = y_clf_test[y_clf_test.isin([1, -1])].index
     
     X_reg_train, y_reg_train = X.loc[win_indices_train], y_reg.loc[win_indices_train]
     X_reg_val, y_reg_val = X.loc[win_indices_val], y_reg.loc[win_indices_val]
@@ -68,7 +80,7 @@ def train(hf_path, nf_path, labels_path, out_clf="lgbm_classifier.joblib", out_r
         mae = mean_absolute_error(y_reg_test, preds_reg)
         print(f"Mean Absolute Error: {mae:.8f}")
     else:
-        print("Not enough non-zero labels to train a regressor.")
+        print("Not enough win conditions (label 1 or -1) to train a regressor.")
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="Train final LightGBM models.")
@@ -79,3 +91,5 @@ if __name__ == "__main__":
     p.add_argument("--out-reg", default="lgbm_regressor.joblib")
     args = p.parse_args()
     train(args.hf, args.nf, args.labels, args.out_clf, args.out_reg)
+
+
