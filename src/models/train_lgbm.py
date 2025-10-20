@@ -34,7 +34,6 @@ def train(hf_path, nf_path, labels_path, out_clf="lgbm_classifier.joblib", out_r
 
     # 3. Train Classifier
     print("\n--- Training LGBM Classifier ---")
-    # CHANGED: num_class is now 4 to handle {-1, 0, 1, 2}
     clf = lgb.LGBMClassifier(objective="multiclass", num_class=4, n_estimators=1000, random_state=42, n_jobs=-1)
     
     # LightGBM requires labels in [0, num_class-1]. We need to map {-1, 0, 1, 2} -> {0, 1, 2, 3}
@@ -53,13 +52,12 @@ def train(hf_path, nf_path, labels_path, out_clf="lgbm_classifier.joblib", out_r
     reverse_map = {v: k for k, v in label_map.items()}
     preds_labels = pd.Series(preds_labels_mapped).map(reverse_map)
     
-    # CHANGED: Updated target_names for the new scheme
     target_names = ["Short Win (-1)", "Timeout (0)", "Long Win (1)", "Loss (2)"]
     print(classification_report(y_clf_test, preds_labels, target_names=target_names, labels=[-1, 0, 1, 2]))
 
     # 4. Train Regressor
     print("\n--- Training LGBM Regressor ---")
-    # --- UPDATED: Train ONLY on Win conditions (label is 1 or -1) ---
+    # Train ONLY on Win conditions (label is 1 or -1)
     win_indices_train = y_clf_train[y_clf_train.isin([1, -1])].index
     win_indices_val = y_clf_val[y_clf_val.isin([1, -1])].index
     win_indices_test = y_clf_test[y_clf_test.isin([1, -1])].index
@@ -91,5 +89,3 @@ if __name__ == "__main__":
     p.add_argument("--out-reg", default="lgbm_regressor.joblib")
     args = p.parse_args()
     train(args.hf, args.nf, args.labels, args.out_clf, args.out_reg)
-
-
