@@ -120,3 +120,4 @@ class TransformerFeatureExtractor(nn.Module):
         x_pooled = x.mean(dim=1)
         final_features = self.output_projection(x_pooled)
         return final_features
+        
