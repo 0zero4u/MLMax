@@ -131,4 +131,3 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="Directory to save the output parquet and npy files.")
     args = parser.parse_args()
     build_dataset(args.trade_csv, args.book_csv, args.out_dir)
-      
