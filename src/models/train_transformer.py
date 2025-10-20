@@ -25,12 +25,12 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
     print(f"Using device: {device}")
     X = np.load(seq_npy).astype(np.float32)
     
-    # CHANGED: Labels are now {-1, 0, 1, 2}. Map them to {0, 1, 2, 3} for CrossEntropyLoss.
+    # Labels are {-1, 0, 1, 2}. Map them to {0, 1, 2, 3} for CrossEntropyLoss.
     y_original = pd.read_parquet(labels_parquet)["label"].values
     label_map = {-1: 0, 0: 1, 1: 2, 2: 3}
     y = np.array([label_map[label] for label in y_original], dtype=np.int64)
     
-    # --- UPDATED: Full Train/Validation/Test Split ---
+    # Full Train/Validation/Test Split
     n = len(X)
     i1 = int(n * 0.7)
     i2 = int(n * 0.85)
@@ -52,7 +52,6 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
     }
     feature_extractor = TransformerFeatureExtractor(**model_config)
     
-    # CHANGED: num_classes is now 4
     model = Predictor(feature_extractor, model_config["output_dim"], num_classes=4).to(device)
 
     # --- Modern Training Stack ---
@@ -106,7 +105,6 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
     best_feature_extractor = TransformerFeatureExtractor(**model_config)
     best_feature_extractor.load_state_dict(torch.load(output_path, map_location=device))
     
-    # CHANGED: num_classes is now 4
     final_model = Predictor(best_feature_extractor, model_config["output_dim"], num_classes=4).to(device)
     final_model.eval()
     
@@ -120,7 +118,6 @@ def train(seq_npy, labels_parquet, output_path="transformer_feature_extractor.pt
             all_preds.extend(preds.cpu().numpy())
             all_true.extend(yb.cpu().numpy())
     
-    # CHANGED: Updated target_names for the new scheme
     target_names = ["Short Win", "Timeout", "Long Win", "Loss"]
     print(classification_report(all_true, all_preds, target_names=target_names))
 
@@ -131,4 +128,4 @@ if __name__ == "__main__":
     p.add_argument("--out", default="transformer_feature_extractor.pth", help="Path to save the trained model weights.")
     args = p.parse_args()
     train(args.seq, args.labels, args.out)
-          
+              
