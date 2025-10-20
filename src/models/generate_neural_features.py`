@@ -1,0 +1,124 @@
+import torch
+import numpy as np
+import pandas as pd
+from torch.utils.data import TensorDataset, DataLoader
+from tqdm import tqdm
+import argparse
+
+# We need the model definition to load the weights
+from src.models.transformer_arch import TransformerFeatureExtractor
+from src.utils.io import save_parquet
+
+def generate_features(model_path, seq_path, output_path, bs=256, device='cpu'):
+    # --- Model Config (must match the trained model) ---
+    # This should be stored in a config file in a real system
+    model_config = {
+        "input_dim": 3,
+        "d_model": 64,
+        "n_heads": 4,
+        "dim_feedforward": 256,
+        "num_layers": 2,
+        "output_dim": 32,
+        "max_seq_len": 100
+    }
+
+    # 1. Load Model
+    print("Loading model...")
+    model = TransformerFeatureExtractor(**model_config).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    print("Model loaded successfully.")
+
+    # 2. Load Data
+    print("Loading raw sequences...")
+    X = np.load(seq_path).astype(np.float32)
+    dataset = TensorDataset(torch.from_numpy(X))
+    loader = DataLoader(dataset, batch_size=bs, shuffle=False)
+    print(f"Data loaded. Shape: {X.shape}")
+
+    # 3. Inference
+    print("Generating neural features...")
+    all_features = []
+    with torch.no_grad():
+        for (xb,) in tqdm(loader):
+            xb = xb.to(device)
+            features = model(xb)
+            all_features.append(features.cpu().numpy())
+
+    neural_features = np.concatenate(all_features, axis=0)
+    print(f"Inference complete. Output shape: {neural_features.shape}")
+
+    # 4. Store Output
+    df_features = pd.DataFrame(neural_features, columns=[f"nf_{i}" for i in range(neural_features.shape[1])])
+    save_parquet(df_features, output_path)
+    print(f"Neural features saved to {output_path}")
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="Generate neural features from a trained Transformer.")
+    p.add_argument("--model-in", required=True, help="Path to the trained transformer_feature_extractor.pth")
+    p.add_argument("--seq-in", required=True, help="Path to the raw_sequences.npy file")
+    p.add_argument("--out", required=True, help="Path to save the output neural_features.parquet")
+    args = p.parse_args()
+    generate_features(args.model_in, args.seq_in, args.out)
+
+```
+
+#### **UPDATED: `MLMax-main/src/labels/triple_barrier.py`**
+
+The labeler is updated to return the realized return, which is needed for the regressor model.
+
+```python
+# src/labels/triple_barrier.py
+"""
+Triple barrier labeler.
+Simple, clear implementation that looks forward `max_horizon` rows from index i
+and returns label in {1, -1, 0}, the realized return, and time to hit.
+It uses mid_price when available, otherwise trade price.
+Fees are applied (fee_pct is round-trip percentage).
+"""
+
+from typing import Tuple
+import numpy as np
+
+def find_triple_barrier_label(df, i:int, pt:float, sl:float, max_horizon:int, fee_pct:float=0.00075) -> Tuple[int, float, int]:
+    """
+    df: unified dataframe (must have 'mid_price' or 'price' columns)
+    i: current row index (entry)
+    pt, sl: profit-take / stop-loss as relative fractions (e.g., 0.0015)
+    max_horizon: number of rows to look ahead
+    fee_pct: per trade fee fraction (apply both entry+exit -> approx 2*fee_pct)
+    Returns: Tuple of (label, realized_return, time_to_hit)
+    """
+    n = len(df)
+    entry = df.iloc[i]
+    entry_price = entry.get("mid_price") if not np.isnan(entry.get("mid_price") if entry.get("mid_price") is not None else np.nan) else entry.get("price")
+    if entry_price is None or np.isnan(entry_price):
+        return 0, 0.0, max_horizon
+
+    round_trip_fee = 2 * fee_pct
+    upper = entry_price * (1.0 + pt + round_trip_fee)
+    lower = entry_price * (1.0 - sl - round_trip_fee)
+
+    end = min(n, i + max_horizon + 1)
+    for j in range(i+1, end):
+        r = df.iloc[j]
+        p = r.get("mid_price") if not np.isnan(r.get("mid_price") if r.get("mid_price") is not None else np.nan) else r.get("price")
+        if p is None or np.isnan(p):
+            continue
+        
+        realized_ret = (p - entry_price) / entry_price
+        time_to_hit = j - i
+
+        if p >= upper:
+            return 1, realized_ret - round_trip_fee, time_to_hit
+        if p <= lower:
+            return -1, realized_ret - round_trip_fee, time_to_hit
+            
+    # Timeout: get return at horizon
+    last_row = df.iloc[end-1]
+    last_price = last_row.get("mid_price") if not np.isnan(last_row.get("mid_price") if last_row.get("mid_price") is not None else np.nan) else last_row.get("price")
+    if last_price is None or np.isnan(last_price):
+        return 0, 0.0, max_horizon
+        
+    final_ret = (last_price - entry_price) / entry_price
+    return 0, final_ret - round_trip_fee, max_horizon
