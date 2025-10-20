@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 from collections import deque
@@ -17,6 +16,8 @@ RAW_SEQ_WINDOW = 100
 PRICE_HISTORY_WINDOW = 100
 LOOKAHEAD_ROWS = 500
 FEE_PCT = 0.0004 # 0.04% taker fee
+### NEW: Warmup period to allow normalization stats to stabilize ###
+WARMUP_TICKS = 2000 # Number of book events to process before generating samples
 
 # Dynamic Barrier Configuration
 K_VOL = 0.40               # Multiplier for volatility to set barrier width
@@ -24,6 +25,26 @@ PROFIT_TAKE_MULT = 1.2     # Profit target is 1.2x the vol-based move
 STOP_LOSS_MULT = 1.0       # Stop loss is 1.0x the vol-based move
 RETURNS_WINDOW_SIZE = 200  # Window for calculating rolling volatility
 MIN_PROFIT_PCT = 0.001     # Minimum 0.1% profit target to ensure goal is achievable
+
+### NEW: Diagnostic report for generated features ###
+def generate_feature_health_report(df_features: pd.DataFrame):
+    """Generates a summary report of the feature statistics."""
+    print("\n" + "="*50)
+    print(" " * 15 + "Feature Health Report")
+    print("="*50)
+    
+    # Exclude non-feature columns for the report
+    feature_cols = [c for c in df_features.columns if c not in ['time']]
+    stats = df_features[feature_cols].describe().transpose()
+    stats['abs_mean'] = stats['mean'].abs()
+    
+    print("\nFeature Statistics:")
+    print(stats[['mean', 'std', 'min', 'max']].round(4).to_string())
+    
+    print("\nTop 5 Features by Absolute Mean Value (Potential Drivers):")
+    print(stats.sort_values('abs_mean', ascending=False).head(5)[['mean', 'std']].round(4).to_string())
+    print("="*50 + "\n")
+
 
 def build_dataset(trade_path: str, book_path: str, output_dir: str):
     """
@@ -33,7 +54,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     df = load_and_merge(trade_path, book_path)
     os.makedirs(output_dir, exist_ok=True)
 
-    print("Step 2: Simulating event stream to generate features and labels...")
+    print(f"Step 2: Simulating event stream (warming up for {WARMUP_TICKS} ticks)...")
     
     # --- State Initialization ---
     state = {
@@ -67,11 +88,13 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     human_features_list = []
     raw_sequences_list = []
     labels_list = []
-    
+
     # --- Main Simulation Loop ---
     trigger_indices = df[df["stream_type"] == "book"].index
+    book_event_counter = 0 # Counter for warmup period
+    
     for i in tqdm(trigger_indices, desc="Generating Samples"):
-        # --- FIX: Initialize aggregated volume for the interval ---
+        book_event_counter += 1
         volume_since_last_book = 0.0
         
         # Fast-forward state to current index `i`
@@ -82,7 +105,6 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 sign = 1 if not row["is_buyer_maker"] else -1
                 cumulative_cvd += sign * row["quote_qty"]
                 state["cvd_history"].append((row["time"] / 1000.0, cumulative_cvd))
-                # --- FIX: Aggregate volume instead of appending directly ---
                 volume_since_last_book += row["quote_qty"]
 
         state["last_processed_index"] = i
@@ -98,22 +120,19 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             microprice = (bid * ask_q + ask * bid_q) / (bid_q + ask_q + 1e-9)
             raw_history["microprice"].append(microprice)
             raw_history["spread"].append(ask - bid)
-            # --- FIX: Append the aggregated volume for synchronization ---
             raw_history["volume"].append(volume_since_last_book)
             
-            # Update state for tactical RV feature
             mid_price = 0.5 * (bid + ask)
             state["mid_price_history"].append(mid_price)
 
-            # Update returns window for dynamic barriers
             if last_microprice is not None and microprice > 0 and last_microprice > 0:
                 ret = (microprice - last_microprice) / last_microprice
                 returns_window.append(ret)
             last_microprice = microprice
         
-        # --- Generate Sample Packet ---
-        # Wait for returns window to fill before generating samples
-        if len(raw_history["microprice"]) == RAW_SEQ_WINDOW and len(returns_window) >= 50:
+        ### MODIFIED: Added warmup period condition ###
+        # Generate Sample Packet only after warmup and if windows are full
+        if book_event_counter > WARMUP_TICKS and len(raw_history["microprice"]) == RAW_SEQ_WINDOW and len(returns_window) >= 50:
             # 1. Generate Human Features
             features = calculate_features(state)
             if not features: continue
@@ -121,11 +140,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             # 2. Generate Label with DYNAMIC barriers
             vol_now = np.std(returns_window)
             dynamic_barrier_width = K_VOL * vol_now
-
-            # Ensure the barrier is at least our minimum achievable target
             final_barrier_width = max(MIN_PROFIT_PCT, dynamic_barrier_width)
-
-            # Use this sane barrier for both profit-take and stop-loss
             final_pt_pct = final_barrier_width * PROFIT_TAKE_MULT
             final_sl_pct = final_barrier_width * STOP_LOSS_MULT
             
@@ -154,19 +169,21 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     df_hf = pd.DataFrame(human_features_list)
     df_labels = pd.DataFrame(labels_list)
     
-    # Align all datasets by the timestamp from features
     if not df_hf.empty and not df_labels.empty:
         df_hf = df_hf.set_index('time')
         df_labels = df_labels.set_index('time')
         common_index = df_hf.index.intersection(df_labels.index)
         df_hf = df_hf.loc[common_index].reset_index()
         df_labels = df_labels.loc[common_index].reset_index()
-        # Align sequences
         raw_sequences_list = np.array(raw_sequences_list, dtype=np.float32)[df_hf.index]
 
     save_parquet(df_hf, os.path.join(output_dir, "human_features.parquet"))
     save_parquet(df_labels, os.path.join(output_dir, "labels.parquet"))
     save_npy(raw_sequences_list, os.path.join(output_dir, "raw_sequences.npy"))
+
+    ### NEW: Run and display the feature health report ###
+    if not df_hf.empty:
+        generate_feature_health_report(df_hf)
 
     print(f"✅ Pipeline complete. Datasets saved in '{output_dir}'.")
     print(f"Total samples generated: {len(df_hf)}")
@@ -178,3 +195,4 @@ if __name__ == "__main__":
     parser.add_argument("--out-dir", required=True, help="Directory to save the output parquet and npy files.")
     args = parser.parse_args()
     build_dataset(args.trade_csv, args.book_csv, args.out_dir)
+    
