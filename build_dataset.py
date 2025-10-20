@@ -1,3 +1,4 @@
+
 import pandas as pd
 import numpy as np
 from collections import deque
@@ -14,7 +15,7 @@ from src.utils.io import save_parquet, save_npy
 # --- Configuration (Inspired by Live Script) ---
 RAW_SEQ_WINDOW = 100
 PRICE_HISTORY_WINDOW = 100
-TIME_HORIZON_SECONDS = 30.0 
+TIME_HORIZON_SECONDS = 30.0
 FEE_PCT = 0.0004
 WARMUP_MINUTES = 3.0
 
@@ -30,14 +31,14 @@ def generate_feature_health_report(df_features: pd.DataFrame):
     print("\n" + "="*50)
     print(" " * 15 + "Feature Health Report")
     print("="*50)
-    
+
     feature_cols = [c for c in df_features.columns if c not in ['time']]
     stats = df_features[feature_cols].describe().transpose()
     stats['abs_mean'] = stats['mean'].abs()
-    
+
     print("\nFeature Statistics:")
     print(stats[['mean', 'std', 'min', 'max']].round(4).to_string())
-    
+
     print("\nTop 5 Features by Absolute Mean Value (Potential Drivers):")
     print(stats.sort_values('abs_mean', ascending=False).head(5)[['mean', 'std']].round(4).to_string())
     print("="*50 + "\n")
@@ -52,7 +53,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Step 2: Simulating event stream (warming up for {WARMUP_MINUTES} minutes)...")
-    
+
     # --- State Initialization ---
     # ... (state initialization remains the same)
     state = {
@@ -75,13 +76,13 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     start_time_ms = df.iloc[0]["time"]
     warmup_duration_ms = WARMUP_MINUTES * 60 * 1000
     warmup_end_time_ms = start_time_ms + warmup_duration_ms
-    
+
     ### NEW: State for trade-based sampling ###
     trades_since_last_sample = 0
 
     for i in tqdm(trigger_indices, desc="Generating Samples"):
         current_time_ms = df.iloc[i]["time"]
-        
+
         # --- Process state (always runs to keep stats up-to-date) ---
         volume_since_last_book = 0.0
         start_index = state.get("last_processed_index", -1) + 1
@@ -95,7 +96,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 ### NEW: Increment trade counter ###
                 trades_since_last_sample += 1
         state["last_processed_index"] = i
-        
+
         current_book = df.iloc[i]
         state.update(current_book.to_dict())
 
@@ -107,7 +108,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             raw_history["microprice"].append(microprice)
             raw_history["spread"].append(ask - bid)
             raw_history["volume"].append(volume_since_last_book)
-            
+
             mid_price = 0.5 * (bid + ask)
             state["mid_price_history"].append(mid_price)
 
@@ -115,7 +116,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
                 ret = (microprice - last_microprice) / last_microprice
                 returns_window.append(ret)
             last_microprice = microprice
-        
+
         ### MODIFIED: Generate sample only if a trade has occurred ###
         conditions_met = (
             current_time_ms > warmup_end_time_ms and
@@ -138,7 +139,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             final_barrier_width = max(MIN_PROFIT_PCT, dynamic_barrier_width)
             final_pt_pct = final_barrier_width * PROFIT_TAKE_MULT
             final_sl_pct = final_barrier_width * STOP_LOSS_MULT
-            
+
             label, ret, t_hit = find_triple_barrier_label(
                 df, i, final_pt_pct, final_sl_pct, TIME_HORIZON_SECONDS, FEE_PCT
             )
@@ -154,9 +155,9 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
             human_features_list.append(features)
             raw_sequences_list.append(sequence)
             labels_list.append({
-                "time": features["time"], 
-                "label": label, 
-                "ret": ret, 
+                "time": features["time"],
+                "label": label,
+                "ret": ret,
                 "time_to_hit": t_hit
             })
 
@@ -164,7 +165,7 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
     print("Step 3: Saving datasets to disk...")
     df_hf = pd.DataFrame(human_features_list)
     df_labels = pd.DataFrame(labels_list)
-    
+
     if not df_hf.empty and not df_labels.empty:
         df_hf = df_hf.set_index('time')
         df_labels = df_labels.set_index('time')
@@ -185,6 +186,11 @@ def build_dataset(trade_path: str, book_path: str, output_dir: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build feature and label datasets from raw tick data.")
-    # ... (args remain the same)
+    
+    # --- FIX: ADDED ARGUMENT DEFINITIONS ---
+    parser.add_argument("--trade-csv", required=True, help="Path to the input trade data CSV file.")
+    parser.add_argument("--book-csv", required=True, help="Path to the input order book data CSV file.")
+    parser.add_argument("--out-dir", required=True, help="Directory to save the output dataset files.")
+    
     args = parser.parse_args()
     build_dataset(args.trade_csv, args.book_csv, args.out_dir)
