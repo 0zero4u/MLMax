@@ -1,9 +1,3 @@
-# src/backtest/simulator.py
-"""
-Tiny backtest simulator to translate labels -> naive trades and compute PnL.
-This is for quick sanity checks only.
-"""
-
 import pandas as pd
 import numpy as np
 
@@ -48,5 +42,5 @@ def naive_trade_sim(df_unified, labels_df, stake=1.0, fee_pct=0.00075):
         "trades": len(results),
         "mean_pnl": float(np.nanmean(results)) if len(results)>0 else 0.0,
         "sum_pnl": float(np.nansum(results)) if len(results)>0 else 0.0
-      }
-      
+        }
+    
